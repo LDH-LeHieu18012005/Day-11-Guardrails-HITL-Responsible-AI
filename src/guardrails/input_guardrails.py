@@ -1,20 +1,54 @@
 """
 Lab 11 — Part 2A: Input Guardrails
-  TODO 3: Injection detection (regex)
-  TODO 4: Topic filter
-  TODO 5: Input Guardrail Plugin (ADK)
+  Task 3: Injection detection (regex)
+  Task 4: Topic filter
+  Task 5: Input Guardrail Plugin (ADK)
 """
 import re
+import sys
+from pathlib import Path
 
-from google.genai import types
-from google.adk.plugins import base_plugin
-from google.adk.agents.invocation_context import InvocationContext
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+try:
+    from google.genai import types
+    from google.adk.plugins import base_plugin
+    from google.adk.agents.invocation_context import InvocationContext
+except ModuleNotFoundError:
+    class _Part:
+        def __init__(self, text=""):
+            self.text = text
+
+        @classmethod
+        def from_text(cls, text):
+            """Create a fallback text part compatible with google.genai Part."""
+            return cls(text=text)
+
+    class _Content:
+        def __init__(self, role="", parts=None):
+            self.role = role
+            self.parts = parts or []
+
+    class _Types:
+        Content = _Content
+        Part = _Part
+
+    class _BasePlugin:
+        def __init__(self, name="plugin"):
+            self.name = name
+
+    class _BasePluginModule:
+        BasePlugin = _BasePlugin
+
+    types = _Types()
+    base_plugin = _BasePluginModule()
+    InvocationContext = object
 
 from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
 
 
 # ============================================================
-# TODO 3: Implement detect_injection()
+# Task 3: Implement detect_injection()
 #
 # Write regex patterns to detect prompt injection.
 # The function takes user_input (str) and returns True if injection is detected.
@@ -38,9 +72,19 @@ def detect_injection(user_input: str) -> bool:
         True if injection detected, False otherwise
     """
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"ignore (all )?(previous|above|prior) (instructions|directives|rules)",
+        r"(forget|disregard|override) (all )?(previous|above|prior)? ?(instructions|directives|rules|system prompt)",
+        r"\byou are now\b",
+        r"\b(DAN|developer mode|unrestricted AI)\b",
+        r"\b(system|hidden|internal) (prompt|instructions|message|notes?)\b",
+        r"reveal (your )?(instructions|prompt|system prompt|secrets?|credentials?)",
+        r"(pretend|act) as (a |an )?(unrestricted|uncensored|different|developer|admin)",
+        r"(output|translate|convert|encode|reformat).*(system prompt|instructions|hidden notes?|config)",
+        r"(admin password|api key|database (connection|string|host|endpoint)|credentials?)",
+        r"(bỏ qua|bo qua|quên|quen).*(hướng dẫn|huong dan|chỉ dẫn|chi dan)",
+        r"(tiết lộ|tiet lo|cho tôi xem|cho toi xem).*(mật khẩu|mat khau|system prompt|api key)",
+        r"fill in.*(password|api key|credential|database)",
+        r"(CONFIRMED|CORRECTED).*(password|api key|credential)",
     ]
 
     for pattern in INJECTION_PATTERNS:
@@ -50,7 +94,7 @@ def detect_injection(user_input: str) -> bool:
 
 
 # ============================================================
-# TODO 4: Implement topic_filter()
+# Task 4: Implement topic_filter()
 #
 # Check if user_input belongs to allowed topics.
 # The VinBank agent should only answer about: banking, account,
@@ -68,18 +112,30 @@ def topic_filter(user_input: str) -> bool:
     Returns:
         True if input should be BLOCKED (off-topic or blocked topic)
     """
-    input_lower = user_input.lower()
+    input_lower = user_input.lower().strip()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    if not input_lower:
+        return True
 
-    pass  # Replace with your implementation
+    if any(topic in input_lower for topic in BLOCKED_TOPICS):
+        return True
+
+    if any(topic in input_lower for topic in ALLOWED_TOPICS):
+        return False
+
+    # Common banking phrases that may not contain the exact config keywords.
+    banking_phrases = [
+        "atm", "vnd", "money", "card", "cash", "wire", "joint account",
+        "mortgage", "overdraft", "fee", "statement", "pin",
+    ]
+    if any(phrase in input_lower for phrase in banking_phrases):
+        return False
+
+    return True
 
 
 # ============================================================
-# TODO 5: Implement InputGuardrailPlugin
+# Task 5: Implement InputGuardrailPlugin
 #
 # This plugin blocks bad input BEFORE it reaches the LLM.
 # Fill in the on_user_message_callback method.
@@ -128,14 +184,22 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        if detect_injection(text):
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process requests that try to override instructions, "
+                "extract hidden prompts, or reveal credentials. I can help with "
+                "normal banking questions."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text):
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm a VinBank assistant and can only help with banking-related "
+                "questions such as accounts, transfers, savings, loans, cards, and ATM services."
+            )
+
+        return None
 
 
 # ============================================================

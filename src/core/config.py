@@ -7,9 +7,11 @@ import os
 def setup_api_key():
     """Load Google API key from environment or prompt."""
     if "GOOGLE_API_KEY" not in os.environ:
-        os.environ["GOOGLE_API_KEY"] = input("Enter Google API Key: ")
+        os.environ["GOOGLE_API_KEY"] = ""
+        print("GOOGLE_API_KEY not set; using local deterministic fallback where available.")
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
-    print("API key loaded.")
+    if os.environ["GOOGLE_API_KEY"]:
+        print("API key loaded.")
 
 
 # Allowed banking topics (used by topic_filter)

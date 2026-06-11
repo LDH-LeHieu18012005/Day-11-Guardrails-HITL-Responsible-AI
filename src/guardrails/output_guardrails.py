@@ -1,55 +1,84 @@
 """
-Lab 11 — Part 2B: Output Guardrails
-  TODO 6: Content filter (PII, secrets)
-  TODO 7: LLM-as-Judge safety check
-  TODO 8: Output Guardrail Plugin (ADK)
+Lab 11 - Part 2B: Output Guardrails
+  Task 6: Content filter (PII, secrets)
+  Task 7: LLM-as-Judge safety check
+  Task 8: Output Guardrail Plugin (ADK)
 """
 import re
-import textwrap
+import sys
+from pathlib import Path
 
-from google.genai import types
-from google.adk.agents import llm_agent
-from google.adk import runners
-from google.adk.plugins import base_plugin
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+try:
+    from google.genai import types
+    from google.adk.agents import llm_agent
+    from google.adk import runners
+    from google.adk.plugins import base_plugin
+except ModuleNotFoundError:
+    class _Part:
+        def __init__(self, text=""):
+            self.text = text
+
+        @classmethod
+        def from_text(cls, text):
+            """Create a fallback text part compatible with google.genai Part."""
+            return cls(text=text)
+
+    class _Content:
+        def __init__(self, role="", parts=None):
+            self.role = role
+            self.parts = parts or []
+
+    class _Types:
+        Content = _Content
+        Part = _Part
+
+    class _BasePlugin:
+        def __init__(self, name="plugin"):
+            self.name = name
+
+    class _BasePluginModule:
+        BasePlugin = _BasePlugin
+
+    class _LlmAgentModule:
+        class LlmAgent:
+            """Fallback placeholder that reports google-adk is unavailable."""
+
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("google-adk is not installed")
+
+    class _RunnersModule:
+        class InMemoryRunner:
+            """Fallback placeholder that reports google-adk is unavailable."""
+
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("google-adk is not installed")
+
+    types = _Types()
+    llm_agent = _LlmAgentModule()
+    runners = _RunnersModule()
+    base_plugin = _BasePluginModule()
 
 from core.utils import chat_with_agent
 
 
-# ============================================================
-# TODO 6: Implement content_filter()
-#
-# Check if the response contains PII (personal info), API keys,
-# passwords, or inappropriate content.
-#
-# Return a dict with:
-# - "safe": True/False
-# - "issues": list of problems found
-# - "redacted": cleaned response (PII replaced with [REDACTED])
-# ============================================================
-
 def content_filter(response: str) -> dict:
-    """Filter response for PII, secrets, and harmful content.
-
-    Args:
-        response: The LLM's response text
-
-    Returns:
-        dict with 'safe', 'issues', and 'redacted' keys
-    """
+    """Detect and redact PII, credentials, and internal infrastructure leaks."""
     issues = []
     redacted = response
 
-    # PII patterns to check
-    PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+    pii_patterns = {
+        "VN phone number": r"\b0\d{9,10}\b",
+        "Email": r"\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
+        "National ID": r"\b(?:\d{9}|\d{12})\b",
+        "API key": r"\bsk-[a-zA-Z0-9-]+\b",
+        "Password": r"\b(?:admin\s+)?password\s*['\"]?\s*(?:is|[:=])\s*['\"]?\S+",
+        "Database endpoint": r"\b[\w.-]+\.internal(?::\d+)?\b",
+        "Connection string": r"\b(?:postgres|mysql|mongodb|redis)://[^\s]+",
     }
 
-    for name, pattern in PII_PATTERNS.items():
+    for name, pattern in pii_patterns.items():
         matches = re.findall(pattern, response, re.IGNORECASE)
         if matches:
             issues.append(f"{name}: {len(matches)} found")
@@ -61,17 +90,6 @@ def content_filter(response: str) -> dict:
         "redacted": redacted,
     }
 
-
-# ============================================================
-# TODO 7: Implement LLM-as-Judge
-#
-# Create a separate agent (judge) to check response safety.
-# The judge classifies responses as SAFE or UNSAFE.
-#
-# KEY: The judge's instruction must NOT contain {placeholders}
-# because ADK treats them as context variables.
-# Instead, pass the content to evaluate as the user message.
-# ============================================================
 
 SAFETY_JUDGE_INSTRUCTION = """You are a safety classifier for an AI banking assistant.
 Your job is to determine if a given AI response is safe to send to customers.
@@ -89,38 +107,55 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-2.0-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
+NO_ADK_JUDGE = object()
 
-safety_judge_agent = None  # TODO: Replace with implementation
+try:
+    safety_judge_agent = llm_agent.LlmAgent(
+        model="gemini-2.5-flash-lite",
+        name="safety_judge",
+        instruction=SAFETY_JUDGE_INSTRUCTION,
+    )
+except Exception:
+    safety_judge_agent = NO_ADK_JUDGE
 judge_runner = None
 
 
 def _init_judge():
-    """Initialize the judge agent and runner (call after creating the agent)."""
+    """Initialize the optional ADK judge runner."""
     global judge_runner
-    if safety_judge_agent is not None:
+    if safety_judge_agent is not NO_ADK_JUDGE:
         judge_runner = runners.InMemoryRunner(
             agent=safety_judge_agent, app_name="safety_judge"
         )
 
 
 async def llm_safety_check(response_text: str) -> dict:
-    """Use LLM judge to check if response is safe.
+    """Judge response safety, using local checks first and ADK judge if available."""
+    local_filter = content_filter(response_text)
+    if not local_filter["safe"]:
+        return {
+            "safe": False,
+            "verdict": "UNSAFE\nLocal safety filter found: "
+            + ", ".join(local_filter["issues"]),
+        }
 
-    Args:
-        response_text: The agent's response to evaluate
+    suspicious_terms = [
+        "admin password",
+        "api key",
+        "system prompt",
+        "hidden instruction",
+        "database endpoint",
+        "connection string",
+        "credential",
+    ]
+    if any(term in response_text.lower() for term in suspicious_terms):
+        return {
+            "safe": False,
+            "verdict": "UNSAFE\nResponse discusses internal secrets or credentials.",
+        }
 
-    Returns:
-        dict with 'safe' (bool) and 'verdict' (str)
-    """
-    if safety_judge_agent is None or judge_runner is None:
-        return {"safe": True, "verdict": "Judge not initialized — skipping"}
+    if safety_judge_agent is NO_ADK_JUDGE or judge_runner is None:
+        return {"safe": True, "verdict": "SAFE\nJudge not initialized; local checks passed."}
 
     prompt = f"Evaluate this AI response for safety:\n\n{response_text}"
     verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
@@ -128,30 +163,18 @@ async def llm_safety_check(response_text: str) -> dict:
     return {"safe": is_safe, "verdict": verdict.strip()}
 
 
-# ============================================================
-# TODO 8: Implement OutputGuardrailPlugin
-#
-# This plugin checks the agent's output BEFORE sending to the user.
-# Uses after_model_callback to intercept LLM responses.
-# Combines content_filter() and llm_safety_check().
-#
-# NOTE: after_model_callback uses keyword-only arguments.
-#   - llm_response has a .content attribute (types.Content)
-#   - Return the (possibly modified) llm_response, or None to keep original
-# ============================================================
-
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
-    """Plugin that checks agent output before sending to user."""
+    """ADK plugin that redacts or blocks unsafe model output."""
 
     def __init__(self, use_llm_judge=True):
         super().__init__(name="output_guardrail")
-        self.use_llm_judge = use_llm_judge and (safety_judge_agent is not None)
+        self.use_llm_judge = use_llm_judge
         self.blocked_count = 0
         self.redacted_count = 0
         self.total_count = 0
 
     def _extract_text(self, llm_response) -> str:
-        """Extract text from LLM response."""
+        """Extract text from an ADK LLM response object."""
         text = ""
         if hasattr(llm_response, "content") and llm_response.content:
             for part in llm_response.content.parts:
@@ -159,34 +182,41 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
                     text += part.text
         return text
 
-    async def after_model_callback(
-        self,
-        *,
-        callback_context,
-        llm_response,
-    ):
-        """Check LLM response before sending to user."""
+    async def after_model_callback(self, *, callback_context, llm_response):
+        """Check and modify the LLM response before it is sent to the user."""
         self.total_count += 1
 
         response_text = self._extract_text(llm_response)
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        filtered = content_filter(response_text)
+        checked_text = response_text
+        if not filtered["safe"]:
+            self.redacted_count += 1
+            checked_text = filtered["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=checked_text)],
+            )
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            judge = await llm_safety_check(checked_text)
+            if not judge["safe"]:
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(
+                        text=(
+                            "I cannot provide that information. I can still help "
+                            "with safe banking questions about accounts, transfers, "
+                            "cards, loans, savings, and ATM services."
+                        )
+                    )],
+                )
 
+        return llm_response
 
-# ============================================================
-# Quick tests
-# ============================================================
 
 def test_content_filter():
     """Test content_filter with sample responses."""
@@ -206,8 +236,4 @@ def test_content_filter():
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
     test_content_filter()

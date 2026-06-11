@@ -1,21 +1,32 @@
 """
-Lab 11 — Helper Utilities
+Lab 11 - Helper Utilities
 """
-from google.genai import types
+try:
+    from google.genai import types
+except ModuleNotFoundError:
+    class _Part:
+        def __init__(self, text=""):
+            self.text = text
+
+        @classmethod
+        def from_text(cls, text):
+            """Create a fallback text part compatible with google.genai Part."""
+            return cls(text=text)
+
+    class _Content:
+        def __init__(self, role="", parts=None):
+            self.role = role
+            self.parts = parts or []
+
+    class _Types:
+        Content = _Content
+        Part = _Part
+
+    types = _Types()
 
 
 async def chat_with_agent(agent, runner, user_message: str, session_id=None):
-    """Send a message to the agent and get the response.
-
-    Args:
-        agent: The LlmAgent instance
-        runner: The InMemoryRunner instance
-        user_message: Plain text message to send
-        session_id: Optional session ID to continue a conversation
-
-    Returns:
-        Tuple of (response_text, session)
-    """
+    """Send a message to the agent and return response text plus session."""
     user_id = "student"
     app_name = runner.app_name
 
@@ -29,14 +40,9 @@ async def chat_with_agent(agent, runner, user_message: str, session_id=None):
             pass
 
     if session is None:
-        try:
-            session = await runner.session_service.create_session(
-                app_name=app_name, user_id=user_id
-            )
-        except Exception:
-            session = await runner.session_service.create_session(
-                app_name=app_name, user_id=user_id
-            )
+        session = await runner.session_service.create_session(
+            app_name=app_name, user_id=user_id
+        )
 
     content = types.Content(
         role="user",
